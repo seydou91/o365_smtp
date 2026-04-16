@@ -4,8 +4,8 @@
     "type": "drupal-module",
     "license": "GPL-2.0-or-later",
     "require": {
-        "php": ">=7.4",
-        "drupal/core": "^8.8 || ^9 || ^10",
+        "php": ">=8.1",
+        "drupal/core": "^10 || ^11",
         "guzzlehttp/guzzle": "^6.0 || ^7.0"
     },
     "minimum-stability": "dev",
