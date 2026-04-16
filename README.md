@@ -59,5 +59,5 @@ $params['attachments'][] = [
 ## Tested with
 
 - Office 365 / Microsoft 365
-- Drupal 8, 9, and 10
-- PHP 7.4+
+- Drupal 10 and 11
+- PHP 8.1+
