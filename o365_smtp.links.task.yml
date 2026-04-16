@@ -1,0 +1,10 @@
+o365_smtp.settings_tab:
+  route_name: o365_smtp.settings
+  title: 'Settings'
+  base_route: o365_smtp.settings
+
+o365_smtp.test_tab:
+  route_name: o365_smtp.test
+  title: 'Test Email'
+  base_route: o365_smtp.settings
+  weight: 10

@@ -1,0 +1,7 @@
+# Drupal.org export-ignore
+
+# Files excluded from releases
+/.gitattributes
+/README.md
+/LICENSE
+composer.json

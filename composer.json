@@ -1,0 +1,16 @@
+{
+    "name": "drupal/o365_smtp",
+    "description": "Sends emails via Office 365 SMTP using OAuth2 authentication.",
+    "type": "drupal-module",
+    "license": "GPL-2.0-or-later",
+    "require": {
+        "php": ">=7.4",
+        "drupal/core": "^8.8 || ^9 || ^10",
+        "guzzlehttp/guzzle": "^6.0 || ^7.0"
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true,
+    "config": {
+        "sort-packages": true
+    }
+}

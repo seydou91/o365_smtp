@@ -1,0 +1,6 @@
+name: 'Office 365 SMTP OAuth2'
+type: module
+description: 'Sends emails via Office 365 SMTP using OAuth2 authentication.'
+core_version_requirement: ^8 || ^9 || ^10
+package: Mail
+configure: o365_smtp.settings

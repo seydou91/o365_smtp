@@ -1,0 +1,23 @@
+o365_smtp.settings:
+  path: '/admin/config/system/o365_smtp'
+  defaults:
+    _form: '\Drupal\o365_smtp\Form\O365SmtpSettingsForm'
+    _title: 'Office 365 SMTP Settings'
+  requirements:
+    _permission: 'administer site configuration'
+
+o365_smtp.callback:
+  path: '/phpmailer_oauth2/aad-callback'
+  defaults:
+    _controller: '\Drupal\o365_smtp\Controller\O365AuthController::callback'
+    _title: 'Office 365 OAuth Callback'
+  requirements:
+    _permission: 'administer site configuration'
+
+o365_smtp.test:
+  path: '/admin/config/system/o365_smtp/test'
+  defaults:
+    _form: '\Drupal\o365_smtp\Form\O365SmtpTestForm'
+    _title: 'Test Office 365 Email'
+  requirements:
+    _permission: 'administer site configuration'

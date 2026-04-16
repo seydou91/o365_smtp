@@ -1,0 +1,4 @@
+services:
+  o365_smtp.client:
+    class: Drupal\o365_smtp\Service\O365Client
+    arguments: ['@config.factory', '@http_client', '@state', '@logger.factory']
