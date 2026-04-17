@@ -205,11 +205,37 @@ class O365Client
 
     $message = $this->buildMimeMessage($from, $to, $subject, $body, $attachments);
 
-    $this->sendCommand($socket, $message);
+    $this->sendDataMessage($socket, $message);
     $this->sendCommand($socket, "QUIT");
 
     fclose($socket);
     return TRUE;
+  }
+
+  /**
+   * Sends the message body via DATA command with proper dot-stuffing.
+   *
+   * @param resource $socket
+   * @param string $message
+   *
+   * @throws \Exception
+   */
+  protected function sendDataMessage($socket, $message)
+  {
+    $lines = explode("\r\n", $message);
+    foreach ($lines as $line) {
+      if ($line === '') {
+        fwrite($socket, "\r\n");
+      }
+      else {
+        fwrite($socket, $this->smtpEscape($line) . "\r\n");
+      }
+    }
+    fwrite($socket, ".\r\n");
+    $response = $this->readResponse($socket);
+    if (preg_match('/^[45]/', $response)) {
+      throw new \Exception("SMTP Error during DATA: $response");
+    }
   }
 
   /**
@@ -237,7 +263,7 @@ class O365Client
       $headers .= "Content-Type: text/html; charset=UTF-8\r\n";
       $headers .= "Content-Transfer-Encoding: 8bit\r\n";
       $body .= "\r\n";
-      return $headers . "\r\n" . $body . "\r\n.";
+      return $headers . "\r\n" . $body;
     }
 
     $headers .= "Content-Type: multipart/mixed; boundary=\"$mime_boundary\"\r\n";
@@ -267,8 +293,25 @@ class O365Client
       $message .= "\r\n" . $file_content . "\r\n";
     }
 
-    $message .= "--$mime_boundary--\r\n.\r\n";
+    $message .= "--$mime_boundary--\r\n";
     return $message;
+  }
+
+  /**
+   * Escapes a line for SMTP dot-stuffing (RFC 5321).
+   *
+   * If a line starts with a dot, an extra dot is added.
+   *
+   * @param string $line
+   *
+   * @return string
+   */
+  protected function smtpEscape($line)
+  {
+    if (strpos($line, '.') === 0) {
+      return '.' . $line;
+    }
+    return $line;
   }
 
   /**
