@@ -1,5 +1,5 @@
 {
-    "name": "drupal/o365_smtp",
+    "name": "seydou91/o365_smtp",
     "description": "Sends emails via Office 365 SMTP using OAuth2 authentication.",
     "type": "drupal-module",
     "license": "GPL-2.0-or-later",
