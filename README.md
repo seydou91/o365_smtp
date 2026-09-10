@@ -29,8 +29,11 @@ Sends emails via Office 365 / Microsoft 365 using OAuth2 authentication. This mo
 ### Using Composer (Recommended)
 
 ```bash
-composer require drupal/o365_smtp
+composer require 'drupal/o365_smtp:2.0.x-dev@dev'
 ```
+
+Until a stable 2.0.0 release is published, the version constraint is needed:
+without it Composer only looks for stable releases.
 
 ### Enable the Module
 
@@ -151,10 +154,22 @@ authorized.
 
 ### Step 3: Set as Default Mail System (Optional)
 
-To use this module for all site emails:
+To use this module for all site emails, set it as the default mail plugin.
+Drupal core has no user interface for this setting; use either:
 
-1. Go to **Configuration** > **System** > **Mail system** (`/admin/config/system/mail`)
-2. Set the "Default system" to "Office 365 SMTP"
+- Drush:
+
+  ```bash
+  drush config:set system.mail interface.default o365_smtp_mail
+  ```
+
+- or the [Mail System](https://www.drupal.org/project/mailsystem) module: go to
+  **Configuration** > **System** > **Mail System**
+  (`/admin/config/system/mailsystem`) and select **Office 365 SMTP** as
+  *Formatter* and *Sender*.
+
+Send a message from the test form first: once the default mail system is
+changed, every email of the site goes through Office 365.
 
 ## Usage
 
