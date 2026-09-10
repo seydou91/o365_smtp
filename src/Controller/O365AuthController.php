@@ -50,33 +50,38 @@ class O365AuthController extends ControllerBase {
   }
 
   /**
-   * Starts the authorization (?op=authorize) or handles Microsoft's callback.
-   *
-   * @param \Symfony\Component\HttpFoundation\Request $request
-   *   The current request.
+   * Redirects the administrator to the Microsoft authorization page.
    *
    * @return \Symfony\Component\HttpFoundation\Response
-   *   A redirect to Microsoft or back to the settings form.
+   *   A redirect to Microsoft, or back to the settings form.
    */
-  public function callback(Request $request): Response {
+  public function authorize(): Response {
     if (!$this->client->isConfigured()) {
       $this->messenger()->addError($this->t('Missing configuration. Please configure the module first.'));
       return $this->redirect('o365_smtp.settings');
     }
 
-    $store = $this->tempStoreFactory->get('o365_smtp');
-    $redirect_uri = Url::fromRoute('o365_smtp.callback', [], ['absolute' => TRUE])->toString(TRUE)->getGeneratedUrl();
+    $state = bin2hex(random_bytes(32));
+    $this->tempStoreFactory->get('o365_smtp')->set(self::STATE_KEY, $state);
 
-    if ($request->query->get('op') === 'authorize') {
-      $state = bin2hex(random_bytes(32));
-      $store->set(self::STATE_KEY, $state);
-      $response = new TrustedRedirectResponse($this->client->getAuthorizationUrl($redirect_uri, $state));
-      // The redirect carries a single-use state value: it must never be cached.
-      $response->getCacheableMetadata()->setCacheMaxAge(0);
-      return $response;
-    }
+    $response = new TrustedRedirectResponse($this->client->getAuthorizationUrl($this->getRedirectUri(), $state));
+    // The redirect carries a single-use state value: it must never be cached.
+    $response->getCacheableMetadata()->setCacheMaxAge(0);
+    return $response;
+  }
 
+  /**
+   * Handles the redirect back from Microsoft.
+   *
+   * @param \Symfony\Component\HttpFoundation\Request $request
+   *   The current request.
+   *
+   * @return \Symfony\Component\HttpFoundation\Response
+   *   A redirect to the settings form.
+   */
+  public function callback(Request $request): Response {
     // The state is single use: remove it before comparing.
+    $store = $this->tempStoreFactory->get('o365_smtp');
     $expected_state = $store->get(self::STATE_KEY);
     $store->delete(self::STATE_KEY);
     $received_state = $request->query->get('state');
@@ -100,7 +105,7 @@ class O365AuthController extends ControllerBase {
     }
 
     try {
-      $this->client->getAccessTokenFromCode($code, $redirect_uri);
+      $this->client->getAccessTokenFromCode($code, $this->getRedirectUri());
       $this->messenger()->addStatus($this->t('Successfully authenticated with Office 365.'));
     }
     catch (\Exception $e) {
@@ -108,6 +113,16 @@ class O365AuthController extends ControllerBase {
     }
 
     return $this->redirect('o365_smtp.settings');
+  }
+
+  /**
+   * Returns the redirect URI to register in Microsoft Entra ID.
+   *
+   * @return string
+   *   The absolute URL of the callback route.
+   */
+  protected function getRedirectUri(): string {
+    return Url::fromRoute('o365_smtp.oauth_callback', [], ['absolute' => TRUE])->toString(TRUE)->getGeneratedUrl();
   }
 
 }

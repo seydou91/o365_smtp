@@ -27,7 +27,7 @@ Sends emails via Office 365 / Microsoft 365 using OAuth2 authentication. This mo
 ### Using Composer (Recommended)
 
 ```bash
-composer require seydou91/o365_smtp
+composer require drupal/o365_smtp
 ```
 
 ### Enable the Module
@@ -47,7 +47,9 @@ Or via the admin UI:
 1. Go to [Microsoft Azure Portal](https://portal.azure.com/) > **Microsoft Entra ID** (formerly Azure Active Directory)
 2. Go to **App registrations** > **New registration**
 3. Enter a name (e.g., "Drupal SMTP")
-4. Set redirect URI: `https://your-domain.com/phpmailer_oauth2/aad-callback`
+4. Set a **Web** redirect URI:
+   `https://your-domain.com/admin/config/system/o365_smtp/oauth/callback`
+   (the exact value is displayed on the module settings page)
 5. Click **Register**
 6. Copy the **Application (client) ID** and **Directory (tenant) ID**
 
@@ -244,13 +246,16 @@ For Drupal 9 support, use the `8.x-1.x` branch. Note that official support may b
 ### How do I upgrade the module?
 
 ```bash
-composer update seydou91/o365_smtp
-```
-
-Then clear Drupal's cache:
-```bash
+composer update drupal/o365_smtp
+drush updatedb
 drush cr
 ```
+
+When upgrading from a version using the `/phpmailer_oauth2/aad-callback`
+redirect URI, replace it in Microsoft Entra ID with
+`https://your-domain.com/admin/config/system/o365_smtp/oauth/callback`. Sending
+keeps working without it; the new URI is only needed the next time you
+authorize. See `CHANGELOG.md` for all upgrade steps.
 
 ## Security Considerations
 

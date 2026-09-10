@@ -76,3 +76,46 @@ All notable changes to this module are documented in this file.
 - `O365Client::send()` gets an optional sixth `$headers` argument. Without a
   `Content-Type` header the body is still sent as HTML.
 - Invalid recipient addresses now throw instead of being passed to the server.
+
+### Lot 3 — Drupal.org contrib compliance
+
+- **Configuration schema** (`config/schema/o365_smtp.schema.yml`) and default
+  configuration (`config/install/o365_smtp.settings.yml`).
+- **`hook_update_10101()`** adds the missing keys (`helo_hostname`,
+  `max_attachment_size`, …) to the configuration of existing sites. Existing
+  values and the State keys (`o365_smtp.access_token`,
+  `o365_smtp.refresh_token`, `o365_smtp.token_expires`) are kept.
+- **`hook_uninstall()`** deletes the tokens and the re-authorization flag from
+  State.
+- **OAuth routes**: the PHPMailer OAuth2 leftover `/phpmailer_oauth2/aad-callback`
+  (single controller branching on `?op=authorize`) is replaced by two routes:
+  - `o365_smtp.oauth_authorize`: `/admin/config/system/o365_smtp/oauth/authorize`
+    (CSRF token required, so a third-party page cannot force a
+    re-authorization);
+  - `o365_smtp.oauth_callback`: `/admin/config/system/o365_smtp/oauth/callback`.
+  The settings form displays the redirect URI to register.
+- **Requirements** moved to an object-oriented
+  `#[Hook('runtime_requirements')]` class (`O365SmtpRequirements`); the
+  procedural `hook_requirements()` is kept with `#[LegacyRequirementsHook]` for
+  Drupal versions before 11.3.
+- **`#[Mail]` attribute** instead of the `@Mail` annotation (deprecated in
+  Drupal 11, removed in 13). This requires Drupal 10.3 or later.
+- **Tests**: unit tests for MIME building (encoded subject, long body,
+  attachments, refused attachments, CRLF injection) and for the OAuth `state`
+  validation; kernel test for the settings form (saving, empty secret keeps the
+  stored value, settings.php override).
+- **composer.json**: package renamed `drupal/o365_smtp`; `guzzlehttp/guzzle`
+  (provided by core) and `minimum-stability: dev` removed.
+
+**Breaking changes**
+
+- **Redirect URI**: in Microsoft Entra ID → App registrations → your app →
+  Authentication, replace
+  `https://example.com/phpmailer_oauth2/aad-callback` with
+  `https://example.com/admin/config/system/o365_smtp/oauth/callback`.
+  Sites that are already authorized keep sending (refreshing a token does not
+  use the redirect URI); the change is needed before the next authorization.
+- **Drupal 10.3 minimum** (`core_version_requirement: ^10.3 || ^11`).
+- Routes `o365_smtp.callback` removed; use `o365_smtp.oauth_authorize` and
+  `o365_smtp.oauth_callback`.
+- Composer package name: `drupal/o365_smtp` instead of `seydou91/o365_smtp`.

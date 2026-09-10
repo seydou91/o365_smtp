@@ -3,22 +3,23 @@
 namespace Drupal\o365_smtp\Plugin\Mail;
 
 use Drupal\Core\Config\ConfigFactoryInterface;
+use Drupal\Core\Mail\Attribute\Mail;
 use Drupal\Core\Mail\MailFormatHelper;
 use Drupal\Core\Mail\MailInterface;
 use Drupal\Core\Plugin\ContainerFactoryPluginInterface;
+use Drupal\Core\StringTranslation\TranslatableMarkup;
 use Drupal\o365_smtp\Service\O365Client;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 
 /**
- * Defines the O365 SMTP Mail plugin.
- *
- * @Mail(
- *   id = "o365_smtp_mail",
- *   label = @Translation("Office 365 SMTP"),
- *   description = @Translation("Sends emails via Office 365 SMTP using OAuth2.")
- * )
+ * Sends emails through Office 365 SMTP with OAuth2 authentication.
  */
+#[Mail(
+  id: 'o365_smtp_mail',
+  label: new TranslatableMarkup('Office 365 SMTP'),
+  description: new TranslatableMarkup('Sends emails via Office 365 SMTP using OAuth2.'),
+)]
 class O365SmtpMail implements MailInterface, ContainerFactoryPluginInterface {
 
   /**

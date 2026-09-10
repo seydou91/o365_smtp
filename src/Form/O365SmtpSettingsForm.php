@@ -148,12 +148,19 @@ class O365SmtpSettingsForm extends ConfigFormBase {
       $link_text = $this->t('Authorize with Office 365');
     }
 
+    $form['redirect_uri'] = [
+      '#type' => 'item',
+      '#title' => $this->t('Redirect URI'),
+      '#plain_text' => Url::fromRoute('o365_smtp.oauth_callback', [], ['absolute' => TRUE])->toString(),
+      '#description' => $this->t('Register this URI as a "Web" redirect URI of the application in Microsoft Entra ID.'),
+    ];
+
     // The authorization link needs saved credentials.
     if ($this->client->isConfigured()) {
       $form['auth_link'] = [
         '#type' => 'link',
         '#title' => $link_text,
-        '#url' => Url::fromRoute('o365_smtp.callback', ['op' => 'authorize']),
+        '#url' => Url::fromRoute('o365_smtp.oauth_authorize'),
         '#attributes' => ['class' => ['button', 'button--primary']],
       ];
     }

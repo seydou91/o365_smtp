@@ -1,0 +1,25 @@
+o365_smtp.settings:
+  type: config_object
+  label: 'Office 365 SMTP settings'
+  mapping:
+    client_id:
+      type: string
+      label: 'Application (client) ID'
+    client_secret:
+      type: string
+      label: 'Client secret (prefer $settings[''o365_smtp.client_secret''] in settings.php)'
+    tenant_id:
+      type: string
+      label: 'Directory (tenant) ID'
+    from_email:
+      type: email
+      label: 'From email address'
+    from_name:
+      type: label
+      label: 'From name'
+    helo_hostname:
+      type: string
+      label: 'EHLO host name'
+    max_attachment_size:
+      type: integer
+      label: 'Maximum size of an attachment, in megabytes'

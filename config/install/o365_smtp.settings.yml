@@ -1,0 +1,7 @@
+client_id: ''
+client_secret: ''
+tenant_id: ''
+from_email: ''
+from_name: ''
+helo_hostname: ''
+max_attachment_size: 10

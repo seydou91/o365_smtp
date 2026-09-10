@@ -5,70 +5,55 @@
  * Install, update and uninstall functions for the Office 365 SMTP module.
  */
 
-use Drupal\Core\Url;
+use Drupal\Core\Hook\Attribute\LegacyRequirementsHook;
+use Drupal\o365_smtp\Hook\O365SmtpRequirements;
+use Drupal\o365_smtp\Service\O365Client;
 
 /**
  * Implements hook_requirements().
+ *
+ * Only used before Drupal 11.3, which calls
+ * O365SmtpRequirements::runtime() instead.
  */
+#[LegacyRequirementsHook]
 function o365_smtp_requirements($phase) {
-  $requirements = [];
-
-  if (!extension_loaded('openssl')) {
-    $requirements['o365_smtp_openssl'] = [
-      'title' => t('Office 365 SMTP: OpenSSL'),
-      'value' => t('Missing'),
-      'description' => t('The PHP OpenSSL extension is required to connect to smtp.office365.com with TLS.'),
-      'severity' => REQUIREMENT_ERROR,
-    ];
-  }
-
   if ($phase !== 'runtime') {
-    return $requirements;
+    return [];
   }
+  return \Drupal::service('class_resolver')
+    ->getInstanceFromDefinition(O365SmtpRequirements::class)
+    ->runtime();
+}
 
-  /** @var \Drupal\o365_smtp\Service\O365Client $client */
-  $client = \Drupal::service('o365_smtp.client');
-  $config = \Drupal::config('o365_smtp.settings');
-  $settings_url = Url::fromRoute('o365_smtp.settings')->toString();
+/**
+ * Implements hook_uninstall().
+ */
+function o365_smtp_uninstall() {
+  \Drupal::state()->deleteMultiple([
+    ...O365Client::TOKEN_STATE_KEYS,
+    O365Client::REAUTHORIZATION_REQUIRED,
+  ]);
+}
 
-  $requirement = ['title' => t('Office 365 SMTP')];
-  if (!$client->isConfigured() || !$config->get('from_email')) {
-    $requirement += [
-      'value' => t('Not configured'),
-      'description' => t('Enter the application credentials and the sender address on the <a href=":url">settings page</a>.', [':url' => $settings_url]),
-      'severity' => REQUIREMENT_WARNING,
-    ];
+/**
+ * Add the default values of the new settings to the existing configuration.
+ */
+function o365_smtp_update_10101() {
+  $config = \Drupal::configFactory()->getEditable('o365_smtp.settings');
+  $defaults = [
+    'client_id' => '',
+    'client_secret' => '',
+    'tenant_id' => '',
+    'from_email' => '',
+    'from_name' => '',
+    'helo_hostname' => '',
+    'max_attachment_size' => O365Client::DEFAULT_MAX_ATTACHMENT_SIZE,
+  ];
+  foreach ($defaults as $key => $default) {
+    if ($config->get($key) === NULL) {
+      $config->set($key, $default);
+    }
   }
-  elseif ($client->isReauthorizationRequired()) {
-    $requirement += [
-      'value' => t('Re-authorization required'),
-      'description' => t('Microsoft rejected the refresh token (expired or revoked). No email can be sent until the module is authorized again on the <a href=":url">settings page</a>.', [':url' => $settings_url]),
-      'severity' => REQUIREMENT_ERROR,
-    ];
-  }
-  elseif (!$client->isAuthorized()) {
-    $requirement += [
-      'value' => t('Not authorized'),
-      'description' => t('Authorize the module with Office 365 on the <a href=":url">settings page</a>.', [':url' => $settings_url]),
-      'severity' => REQUIREMENT_WARNING,
-    ];
-  }
-  else {
-    $requirement += [
-      'value' => t('Authorized'),
-      'severity' => REQUIREMENT_OK,
-    ];
-  }
-  $requirements['o365_smtp'] = $requirement;
-
-  if (!$client->isClientSecretOverridden() && (string) $config->get('client_secret') !== '') {
-    $requirements['o365_smtp_client_secret'] = [
-      'title' => t('Office 365 SMTP: client secret'),
-      'value' => t('Stored in configuration'),
-      'description' => t('The client secret is exported with the site configuration. Define it in settings.php with <code>@setting</code> and remove it from the configuration.', ['@setting' => "\$settings['o365_smtp.client_secret']"]),
-      'severity' => REQUIREMENT_WARNING,
-    ];
-  }
-
-  return $requirements;
+  $config->save();
+  return t('Added the EHLO host name and maximum attachment size settings. Update the redirect URI of the Microsoft Entra ID application to /admin/config/system/o365_smtp/oauth/callback before authorizing again.');
 }

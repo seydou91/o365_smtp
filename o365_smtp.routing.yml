@@ -6,13 +6,26 @@ o365_smtp.settings:
   requirements:
     _permission: 'administer site configuration'
 
-o365_smtp.callback:
-  path: '/phpmailer_oauth2/aad-callback'
+o365_smtp.oauth_authorize:
+  path: '/admin/config/system/o365_smtp/oauth/authorize'
   defaults:
-    _controller: '\Drupal\o365_smtp\Controller\O365AuthController::callback'
-    _title: 'Office 365 OAuth Callback'
+    _controller: '\Drupal\o365_smtp\Controller\O365AuthController::authorize'
+    _title: 'Authorize with Office 365'
   requirements:
     _permission: 'administer site configuration'
+    _csrf_token: 'TRUE'
+  options:
+    no_cache: TRUE
+
+o365_smtp.oauth_callback:
+  path: '/admin/config/system/o365_smtp/oauth/callback'
+  defaults:
+    _controller: '\Drupal\o365_smtp\Controller\O365AuthController::callback'
+    _title: 'Office 365 OAuth callback'
+  requirements:
+    _permission: 'administer site configuration'
+  options:
+    no_cache: TRUE
 
 o365_smtp.test:
   path: '/admin/config/system/o365_smtp/test'
