@@ -8,19 +8,21 @@ Sends emails via Office 365 / Microsoft 365 using OAuth2 authentication. This mo
 
 ## Features
 
-- **OAuth2 Authentication**: Secure authentication using Microsoft OAuth2 (no plain text passwords)
-- **Automatic Token Refresh**: Tokens are automatically refreshed before expiration
-- **File Attachments**: Full support for sending emails with file attachments (MIME multipart)
-- **Entity Configuration**: Settings managed via Drupal's configuration system
-- **Test Form**: Built-in form to test email sending
+- **OAuth2 authentication**: delegated authorization code flow with the
+  `SMTP.Send` permission; no mailbox password is stored
+- **Automatic token refresh**, serialized between concurrent requests
+- **Verified TLS** connection to `smtp.office365.com:587` (STARTTLS)
+- **Plain text and HTML emails**, multiple recipients, Cc, Bcc and Reply-To
+- **File attachments** from Drupal stream wrappers, with a size limit
+- **Status report** entries and a **test form** showing the raw SMTP response
 
 ## Requirements
 
-- A Microsoft Entra ID (Azure AD) application registered in the Azure portal
-- The application must have **Mail.Send** permission for Microsoft Graph API
-- A client secret or X.509 certificate configured in Azure AD
-- PHP 8.1+ with OpenSSL extension
-- Drupal 10 or 11
+- Drupal 10.3 or later, or Drupal 11
+- PHP 8.1+ with the OpenSSL extension
+- A Microsoft 365 mailbox with **SMTP AUTH** enabled
+- A Microsoft Entra ID application registration with a client secret and the
+  delegated **SMTP.Send** permission (see below)
 
 ## Installation
 
@@ -63,14 +65,36 @@ Or via the admin UI:
 
 ### Step 3: Configure API Permissions
 
-1. Go to **API permissions**
-2. Click **Add a permission**
-3. Select **Microsoft Graph** > **Application permissions**
-4. Check **Mail.Send**
-5. Click **Add permissions**
-6. Click **Grant admin consent** for your organization
+The module uses the **delegated** authorization code flow: an administrator
+signs in once with the sending mailbox, and the module sends as that mailbox
+over SMTP. Microsoft Graph `Mail.Send` and *application* permissions are
+**not** used.
 
-### Step 4: Note Your Credentials
+1. Go to **API permissions** > **Add a permission**
+2. Select **APIs my organization uses** and search for
+   **Office 365 Exchange Online**
+3. Select **Delegated permissions**, check **SMTP.Send**, then
+   **Add permissions**
+4. Check that **Microsoft Graph** > **offline_access** (delegated) is listed
+   too, and add it the same way if needed: it allows refresh tokens
+5. Click **Grant admin consent for &lt;your organization&gt;**
+
+### Step 4: Enable SMTP AUTH on the Mailbox
+
+SMTP AUTH is disabled by default in many tenants. Enable it for the mailbox
+used as **From Email Address**, either:
+
+- in the Microsoft 365 admin center: **Users** > **Active users** > the user >
+  **Mail** > **Manage email apps** > check **Authenticated SMTP**; or
+- with Exchange Online PowerShell:
+
+  ```powershell
+  Set-CASMailbox -Identity mailbox@example.com -SmtpClientAuthenticationDisabled $false
+  ```
+
+The mailbox setting takes precedence over the tenant-wide setting.
+
+### Step 5: Note Your Credentials
 
 You will need:
 - **Application (client) ID** (e.g., `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`)
@@ -88,6 +112,8 @@ You will need:
    - **Directory (Tenant) ID**: Your Azure AD tenant ID
    - **From Email Address**: The email address to send from (must match an authorized user)
    - **From Name** (optional): Display name for the sender
+   - **Maximum attachment size (MB)**: 10 by default
+   - **EHLO host name** (optional): see *Troubleshooting*
 3. Click **Save configuration**
 
 The client secret field is a password field: leave it empty to keep the
@@ -114,7 +140,14 @@ drush config:set o365_smtp.settings client_secret ''
 
 ### Step 2: Authorize with Microsoft
 
-Click the **Authorize with Office 365** button to complete the OAuth2 flow.
+1. Check that the **Redirect URI** shown on the settings page is registered in
+   the app registration
+2. Click **Authorize with Office 365**
+3. Sign in with the account of the **From Email Address** and accept the
+   requested permissions
+
+The status report (`/admin/reports/status`) then shows the module as
+authorized.
 
 ### Step 3: Set as Default Mail System (Optional)
 
@@ -127,7 +160,10 @@ To use this module for all site emails:
 
 ### Sending Test Emails
 
-Use the built-in test form at `/admin/config/system/o365_smtp/test`
+Use the built-in test form at `/admin/config/system/o365_smtp/test`. It sends a
+plain text message directly through the module, even when it is not the default
+mail system. When sending fails, the form displays the raw last response of the
+SMTP server: include it when asking for support.
 
 ### Sending Emails with Attachments
 
@@ -222,11 +258,19 @@ The error returned by Microsoft is logged and shown, for example
 Check that SMTP AUTH is enabled on the mailbox and that the From Email Address
 is the account that authorized the module.
 
-### Authentication Failed
+### "535 5.7.139 Authentication unsuccessful"
 
-- Verify your Client ID and Client Secret are correct
-- Make sure the "From Email" matches an account authorized to send emails
-- Re-authorize if needed by clicking the authorization link again
+SMTP AUTH is disabled for the mailbox or the tenant: see
+*Step 4: Enable SMTP AUTH on the Mailbox*.
+
+### Authorization errors (AADSTS…)
+
+- `AADSTS50011`: the redirect URI does not match. Register the exact URI shown
+  on the settings page.
+- `AADSTS65001`: consent is missing. Grant admin consent for the delegated
+  permissions.
+- `AADSTS7000215`: invalid client secret. Use the secret *value* (not its ID)
+  and check its expiry date.
 
 ### Connection Refused
 

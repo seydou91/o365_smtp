@@ -75,6 +75,13 @@ class O365Client {
   const REAUTHORIZATION_REQUIRED = 'o365_smtp.reauthorization_required';
 
   /**
+   * The last response read from the SMTP server, for diagnostics.
+   *
+   * @var string
+   */
+  protected string $lastSmtpResponse = '';
+
+  /**
    * Constructs an O365Client object.
    *
    * @param \Drupal\Core\Config\ConfigFactoryInterface $configFactory
@@ -329,6 +336,18 @@ class O365Client {
   }
 
   /**
+   * Returns the last response of the SMTP server during ::send().
+   *
+   * It never contains credentials: only server replies are recorded.
+   *
+   * @return string
+   *   The raw response, or an empty string if the server was not reached.
+   */
+  public function getLastSmtpResponse(): string {
+    return $this->lastSmtpResponse;
+  }
+
+  /**
    * Sends an email via SMTP.
    *
    * @param string $from
@@ -361,6 +380,7 @@ class O365Client {
    * @throws \Exception
    */
   public function send(string $from, string $to, string $subject, string $body, ?array $params = NULL, array $headers = []): bool {
+    $this->lastSmtpResponse = '';
     $sender = $this->validateAddress($from);
     $headers = array_change_key_case(array_map('strval', $headers), CASE_LOWER);
 
@@ -711,11 +731,13 @@ class O365Client {
       $line = fgets($socket, 1024);
       if ($line === FALSE) {
         $reason = stream_get_meta_data($socket)['timed_out'] ? 'Timed out waiting for the SMTP server' : 'The SMTP server closed the connection';
+        $this->lastSmtpResponse = $response;
         throw new \RuntimeException(sprintf('%s. Partial response: %s', $reason, trim($response)));
       }
       $response .= $line;
       // Every line of a multi-line reply but the last has "-" after the code.
     } while (isset($line[3]) && $line[3] === '-');
+    $this->lastSmtpResponse = $response;
     return $response;
   }
 

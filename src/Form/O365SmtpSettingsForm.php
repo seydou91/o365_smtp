@@ -6,7 +6,6 @@ use Drupal\Core\Config\ConfigFactoryInterface;
 use Drupal\Core\Config\TypedConfigManagerInterface;
 use Drupal\Core\Form\ConfigFormBase;
 use Drupal\Core\Form\FormStateInterface;
-use Drupal\Core\State\StateInterface;
 use Drupal\Core\Url;
 use Drupal\o365_smtp\Service\O365Client;
 use Symfony\Component\DependencyInjection\ContainerInterface;
@@ -28,15 +27,12 @@ class O365SmtpSettingsForm extends ConfigFormBase {
    *   The config factory.
    * @param \Drupal\Core\Config\TypedConfigManagerInterface $typed_config_manager
    *   The typed config manager.
-   * @param \Drupal\Core\State\StateInterface $state
-   *   The state service.
    * @param \Drupal\o365_smtp\Service\O365Client $client
    *   The Office 365 client.
    */
   public function __construct(
     ConfigFactoryInterface $config_factory,
     TypedConfigManagerInterface $typed_config_manager,
-    protected StateInterface $state,
     protected O365Client $client,
   ) {
     parent::__construct($config_factory, $typed_config_manager);
@@ -49,7 +45,6 @@ class O365SmtpSettingsForm extends ConfigFormBase {
     return new static(
       $container->get('config.factory'),
       $container->get('config.typed'),
-      $container->get('state'),
       $container->get('o365_smtp.client'),
     );
   }
@@ -73,6 +68,26 @@ class O365SmtpSettingsForm extends ConfigFormBase {
    */
   public function buildForm(array $form, FormStateInterface $form_state) {
     $config = $this->config('o365_smtp.settings');
+
+    if ($this->client->isReauthorizationRequired()) {
+      $message_list = ['error' => [$this->t('Microsoft rejected the refresh token (expired or revoked). Authorize the module with Office 365 again.')]];
+    }
+    elseif ($this->client->isAuthorized()) {
+      $message_list = ['status' => [$this->t('Module is authenticated with Office 365.')]];
+    }
+    else {
+      $message_list = ['warning' => [$this->t('Module is not authenticated. Save the configuration, then authorize it with Office 365.')]];
+    }
+    $form['auth_status'] = [
+      '#theme' => 'status_messages',
+      '#message_list' => $message_list,
+      '#status_headings' => [
+        'status' => $this->t('Status message'),
+        'warning' => $this->t('Warning message'),
+        'error' => $this->t('Error message'),
+      ],
+      '#weight' => -10,
+    ];
 
     $form['client_id'] = [
       '#type' => 'textfield',
@@ -105,7 +120,7 @@ class O365SmtpSettingsForm extends ConfigFormBase {
     $form['from_email'] = [
       '#type' => 'email',
       '#title' => $this->t('From Email Address'),
-      '#description' => $this->t('The email address to send from. Must match the authenticated user account.'),
+      '#description' => $this->t('The mailbox to send from. Authorize the module with this account. It is used as sender for every email, whatever address Drupal provides.'),
       '#default_value' => $config->get('from_email'),
       '#required' => TRUE,
     ];
@@ -113,6 +128,7 @@ class O365SmtpSettingsForm extends ConfigFormBase {
     $form['from_name'] = [
       '#type' => 'textfield',
       '#title' => $this->t('From Name'),
+      '#description' => $this->t('Leave empty to use the name provided by Drupal, usually the site name.'),
       '#default_value' => $config->get('from_name'),
     ];
 
@@ -132,22 +148,6 @@ class O365SmtpSettingsForm extends ConfigFormBase {
       '#default_value' => $config->get('helo_hostname'),
     ];
 
-    // Authorization status and link.
-    $refresh_token = $this->state->get('o365_smtp.refresh_token');
-
-    if ($refresh_token) {
-      $form['auth_status'] = [
-        '#markup' => '<div class="messages messages--status">' . $this->t('Module is authenticated with Office 365.') . '</div>',
-      ];
-      $link_text = $this->t('Re-authorize with Office 365');
-    }
-    else {
-      $form['auth_status'] = [
-        '#markup' => '<div class="messages messages--warning">' . $this->t('Module is NOT authenticated. Please save configuration and then authorize.') . '</div>',
-      ];
-      $link_text = $this->t('Authorize with Office 365');
-    }
-
     $form['redirect_uri'] = [
       '#type' => 'item',
       '#title' => $this->t('Redirect URI'),
@@ -159,7 +159,7 @@ class O365SmtpSettingsForm extends ConfigFormBase {
     if ($this->client->isConfigured()) {
       $form['auth_link'] = [
         '#type' => 'link',
-        '#title' => $link_text,
+        '#title' => $this->client->isAuthorized() ? $this->t('Re-authorize with Office 365') : $this->t('Authorize with Office 365'),
         '#url' => Url::fromRoute('o365_smtp.oauth_authorize'),
         '#attributes' => ['class' => ['button', 'button--primary']],
       ];

@@ -59,6 +59,33 @@ class O365SmtpTestForm extends FormBase {
       '#required' => TRUE,
     ];
 
+    $form['subject'] = [
+      '#type' => 'textfield',
+      '#title' => $this->t('Subject'),
+      '#default_value' => $this->t('Office 365 SMTP test'),
+      '#required' => TRUE,
+    ];
+
+    $form['body'] = [
+      '#type' => 'textarea',
+      '#title' => $this->t('Body'),
+      '#description' => $this->t('Sent as plain text.'),
+      '#default_value' => $this->t('This is a test email sent via Office 365 SMTP.'),
+      '#required' => TRUE,
+    ];
+
+    // Shown after a failure: the raw server reply is what support needs.
+    $smtp_response = (string) $form_state->get('smtp_response');
+    if ($smtp_response !== '') {
+      $form['smtp_response'] = [
+        '#type' => 'textarea',
+        '#title' => $this->t('Last SMTP server response'),
+        '#value' => $smtp_response,
+        '#rows' => 4,
+        '#attributes' => ['readonly' => 'readonly'],
+      ];
+    }
+
     $form['actions'] = [
       '#type' => 'actions',
     ];
@@ -82,11 +109,19 @@ class O365SmtpTestForm extends FormBase {
 
     $to = $form_state->getValue('to');
     try {
-      $this->client->send($from, $to, 'O365 SMTP Test', 'This is a test email sent via Office 365 SMTP.');
+      $this->client->send(
+        $from,
+        $to,
+        (string) $form_state->getValue('subject'),
+        (string) $form_state->getValue('body'),
+        NULL,
+        ['Content-Type' => 'text/plain; charset=UTF-8'],
+      );
       $this->messenger()->addStatus($this->t('Test email sent successfully to @to', ['@to' => $to]));
     }
     catch (\Exception $e) {
       $this->messenger()->addError($this->t('Failed to send email: @message', ['@message' => $e->getMessage()]));
+      $form_state->set('smtp_response', $this->client->getLastSmtpResponse())->setRebuild();
     }
   }
 
