@@ -88,6 +88,28 @@ You will need:
    - **From Name** (optional): Display name for the sender
 3. Click **Save configuration**
 
+The client secret field is a password field: leave it empty to keep the
+current value.
+
+#### Keeping the client secret out of exported configuration
+
+By default the client secret is stored in the `o365_smtp.settings`
+configuration object, which means it ends up in `config/sync` (and usually in
+git) after a `drush config:export`. On production sites, define it in
+`settings.php` instead:
+
+```php
+$settings['o365_smtp.client_secret'] = getenv('O365_SMTP_CLIENT_SECRET');
+```
+
+When this setting is present it always takes precedence over the configuration
+value and the field is disabled in the form. You can then remove the secret
+from configuration:
+
+```bash
+drush config:set o365_smtp.settings client_secret ''
+```
+
 ### Step 2: Authorize with Microsoft
 
 Click the **Authorize with Office 365** button to complete the OAuth2 flow.
@@ -117,9 +139,16 @@ $mail_manager = \Drupal::service('plugin.manager.mail');
 // Prepare attachments.
 $params['attachments'] = [
   [
-    'filepath' => '/path/to/document.pdf',
-    'filename' => 'document.pdf',
+    // A public://, private:// or temporary:// URI.
+    'filepath' => 'private://invoices/invoice-42.pdf',
+    'filename' => 'invoice-42.pdf',
     'filemime' => 'application/pdf',
+  ],
+  [
+    // Or content generated in memory.
+    'filecontent' => $csv,
+    'filename' => 'export.csv',
+    'filemime' => 'text/csv',
   ],
 ];
 
@@ -130,6 +159,15 @@ $langcode = \Drupal::languageManager()->getDefaultLanguage()->getId();
 
 $result = $mail_manager->mail($module, $key, $to, $langcode, $params);
 ```
+
+Attachment restrictions:
+
+- `filepath` must be a `public://`, `private://` or `temporary://` URI. Absolute
+  paths and other stream wrappers are refused, as is any path resolving outside
+  the stream wrapper directory.
+- Each attachment is limited to the size set in the module settings (10 MB by
+  default).
+- A refused attachment is logged and the whole email is not sent.
 
 ## Troubleshooting
 
@@ -175,8 +213,16 @@ drush cr
 ## Security Considerations
 
 - **No passwords stored**: OAuth2 tokens are used instead of passwords
-- **Tokens stored securely**: Tokens are stored in Drupal's State API
-- **Automatic refresh**: Tokens are refreshed automatically before expiration
+- **Tokens outside configuration**: Tokens are stored in Drupal's State API,
+  never in exported configuration
+- **Client secret**: can be defined in `settings.php` so it is never exported
+- **CSRF-protected authorization**: the OAuth2 `state` parameter is random,
+  single use and bound to the administrator's session
+- **Verified TLS**: the certificate and host name of `smtp.office365.com` are
+  verified after STARTTLS
+- **Header injection**: CR, LF and NUL characters are stripped from every value
+  used in a header or an SMTP command, and addresses are validated
+- **Attachments**: only read from Drupal stream wrappers, with a size limit
 
 ## License
 

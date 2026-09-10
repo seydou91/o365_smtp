@@ -2,58 +2,56 @@
 
 namespace Drupal\o365_smtp\Form;
 
+use Drupal\Core\Config\ConfigFactoryInterface;
 use Drupal\Core\Form\FormBase;
 use Drupal\Core\Form\FormStateInterface;
-use Drupal\Core\Mail\MailManagerInterface;
+use Drupal\o365_smtp\Service\O365Client;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 
 /**
- * Form to test email sending.
+ * Sends a test email directly through the Office 365 client.
+ *
+ * The client is used instead of the mail manager so the test exercises this
+ * module even when it is not the site's default mail system.
  */
-class O365SmtpTestForm extends FormBase
-{
+class O365SmtpTestForm extends FormBase {
 
   /**
-   * The mail manager.
+   * Constructs an O365SmtpTestForm object.
    *
-   * @var \Drupal\Core\Mail\MailManagerInterface
+   * @param \Drupal\o365_smtp\Service\O365Client $client
+   *   The Office 365 client.
+   * @param \Drupal\Core\Config\ConfigFactoryInterface $config_factory
+   *   The config factory.
    */
-  protected $mailManager;
-
-  /**
-   * Constructs a new O365SmtpTestForm.
-   *
-   * @param \Drupal\Core\Mail\MailManagerInterface $mail_manager
-   *   The mail manager.
-   */
-  public function __construct(MailManagerInterface $mail_manager)
-  {
-    $this->mailManager = $mail_manager;
+  public function __construct(
+    protected O365Client $client,
+    ConfigFactoryInterface $config_factory,
+  ) {
+    $this->configFactory = $config_factory;
   }
 
   /**
    * {@inheritdoc}
    */
-  public static function create(ContainerInterface $container)
-  {
+  public static function create(ContainerInterface $container) {
     return new static(
-      $container->get('plugin.manager.mail')
+      $container->get('o365_smtp.client'),
+      $container->get('config.factory'),
     );
   }
 
   /**
    * {@inheritdoc}
    */
-  public function getFormId()
-  {
+  public function getFormId() {
     return 'o365_smtp_test_form';
   }
 
   /**
    * {@inheritdoc}
    */
-  public function buildForm(array $form, FormStateInterface $form_state)
-  {
+  public function buildForm(array $form, FormStateInterface $form_state) {
     $form['to'] = [
       '#type' => 'email',
       '#title' => $this->t('To Email'),
@@ -75,33 +73,19 @@ class O365SmtpTestForm extends FormBase
   /**
    * {@inheritdoc}
    */
-  public function submitForm(array &$form, FormStateInterface $form_state)
-  {
+  public function submitForm(array &$form, FormStateInterface $form_state) {
+    $from = (string) $this->config('o365_smtp.settings')->get('from_email');
+    if ($from === '') {
+      $this->messenger()->addError($this->t('From email is not configured.'));
+      return;
+    }
+
     $to = $form_state->getValue('to');
-    $params = ['message' => 'This is a test email from the Office 365 SMTP module.'];
-    $langcode = \Drupal::currentUser()->getPreferredLangcode();
-
-    // Force usage of our mail plugin for this test if not globally set
-    // But usually, we just want to test if the system works.
-    // If the user hasn't set this module as the default mail system, this might fail to use our class.
-    // So we should probably instantiate our client directly or ensure the mail system is used.
-    // For now, let's try the standard mail manager, assuming they might have configured it or we can force it.
-
-    // Actually, to be safe and test *our* logic specifically, let's use our client service directly.
     try {
-      /** @var \Drupal\o365_smtp\Service\O365Client $client */
-      $client = \Drupal::service('o365_smtp.client');
-      $config = \Drupal::config('o365_smtp.settings');
-      $from = $config->get('from_email');
-
-      if (!$from) {
-        $this->messenger()->addError($this->t('From email is not configured.'));
-        return;
-      }
-
-      $client->send($from, $to, 'O365 SMTP Test', 'This is a test email sent via Office 365 SMTP.');
+      $this->client->send($from, $to, 'O365 SMTP Test', 'This is a test email sent via Office 365 SMTP.');
       $this->messenger()->addStatus($this->t('Test email sent successfully to @to', ['@to' => $to]));
-    } catch (\Exception $e) {
+    }
+    catch (\Exception $e) {
       $this->messenger()->addError($this->t('Failed to send email: @message', ['@message' => $e->getMessage()]));
     }
   }

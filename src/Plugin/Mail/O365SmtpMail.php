@@ -2,10 +2,12 @@
 
 namespace Drupal\o365_smtp\Plugin\Mail;
 
+use Drupal\Core\Config\ConfigFactoryInterface;
 use Drupal\Core\Mail\MailInterface;
 use Drupal\Core\Plugin\ContainerFactoryPluginInterface;
+use Drupal\o365_smtp\Service\O365Client;
+use Psr\Log\LoggerInterface;
 use Symfony\Component\DependencyInjection\ContainerInterface;
-use Drupal\Core\Site\Settings;
 
 /**
  * Defines the O365 SMTP Mail plugin.
@@ -16,22 +18,39 @@ use Drupal\Core\Site\Settings;
  *   description = @Translation("Sends emails via Office 365 SMTP using OAuth2.")
  * )
  */
-class O365SmtpMail implements MailInterface, ContainerFactoryPluginInterface
-{
+class O365SmtpMail implements MailInterface, ContainerFactoryPluginInterface {
+
+  /**
+   * Constructs an O365SmtpMail object.
+   *
+   * @param \Drupal\o365_smtp\Service\O365Client $client
+   *   The Office 365 client.
+   * @param \Drupal\Core\Config\ConfigFactoryInterface $configFactory
+   *   The config factory.
+   * @param \Psr\Log\LoggerInterface $logger
+   *   The o365_smtp logger channel.
+   */
+  public function __construct(
+    protected O365Client $client,
+    protected ConfigFactoryInterface $configFactory,
+    protected LoggerInterface $logger,
+  ) {}
 
   /**
    * {@inheritdoc}
    */
-  public static function create(ContainerInterface $container, array $configuration, $plugin_id, $plugin_definition)
-  {
-    return new static();
+  public static function create(ContainerInterface $container, array $configuration, $plugin_id, $plugin_definition) {
+    return new static(
+      $container->get('o365_smtp.client'),
+      $container->get('config.factory'),
+      $container->get('logger.channel.o365_smtp'),
+    );
   }
 
   /**
    * {@inheritdoc}
    */
-  public function format(array $message)
-  {
+  public function format(array $message) {
     // Join the body array into one string.
     $message['body'] = implode("\n\n", $message['body']);
     return $message;
@@ -40,34 +59,29 @@ class O365SmtpMail implements MailInterface, ContainerFactoryPluginInterface
   /**
    * {@inheritdoc}
    */
-  public function mail(array $message)
-  {
-    $config = \Drupal::config('o365_smtp.settings');
-    $from_email = $config->get('from_email');
+  public function mail(array $message) {
+    $from_email = (string) $this->configFactory->get('o365_smtp.settings')->get('from_email');
 
     // If from_email is not configured, we can't send.
-    if (empty($from_email)) {
-      \Drupal::logger('o365_smtp')->error('From email is not configured.');
+    if ($from_email === '') {
+      $this->logger->error('From email is not configured.');
       return FALSE;
     }
 
     try {
-      /** @var \Drupal\o365_smtp\Service\O365Client $client */
-      $client = \Drupal::service('o365_smtp.client');
-
-      $params = $message['params'] ?? NULL;
-      $client->send(
+      $this->client->send(
         $from_email,
-        $message['to'],
-        $message['subject'],
-        $message['body'],
-        $params
+        (string) $message['to'],
+        (string) $message['subject'],
+        (string) $message['body'],
+        $message['params'] ?? NULL
       );
-
       return TRUE;
-    } catch (\Exception $e) {
-      \Drupal::logger('o365_smtp')->error('Mail sending failed: @error', ['@error' => $e->getMessage()]);
+    }
+    catch (\Exception $e) {
+      $this->logger->error('Mail sending failed: @error', ['@error' => $e->getMessage()]);
       return FALSE;
     }
   }
+
 }

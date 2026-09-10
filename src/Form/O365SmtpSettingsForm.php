@@ -2,14 +2,57 @@
 
 namespace Drupal\o365_smtp\Form;
 
+use Drupal\Core\Config\ConfigFactoryInterface;
+use Drupal\Core\Config\TypedConfigManagerInterface;
 use Drupal\Core\Form\ConfigFormBase;
 use Drupal\Core\Form\FormStateInterface;
+use Drupal\Core\State\StateInterface;
 use Drupal\Core\Url;
+use Drupal\o365_smtp\Service\O365Client;
+use Symfony\Component\DependencyInjection\ContainerInterface;
 
 /**
  * Configure Office 365 SMTP settings for this site.
  */
 class O365SmtpSettingsForm extends ConfigFormBase {
+
+  /**
+   * The settings.php entry overriding the client secret, as shown to users.
+   */
+  const SECRET_SETTING = "\$settings['o365_smtp.client_secret']";
+
+  /**
+   * Constructs an O365SmtpSettingsForm object.
+   *
+   * @param \Drupal\Core\Config\ConfigFactoryInterface $config_factory
+   *   The config factory.
+   * @param \Drupal\Core\Config\TypedConfigManagerInterface $typed_config_manager
+   *   The typed config manager.
+   * @param \Drupal\Core\State\StateInterface $state
+   *   The state service.
+   * @param \Drupal\o365_smtp\Service\O365Client $client
+   *   The Office 365 client.
+   */
+  public function __construct(
+    ConfigFactoryInterface $config_factory,
+    TypedConfigManagerInterface $typed_config_manager,
+    protected StateInterface $state,
+    protected O365Client $client,
+  ) {
+    parent::__construct($config_factory, $typed_config_manager);
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public static function create(ContainerInterface $container) {
+    return new static(
+      $container->get('config.factory'),
+      $container->get('config.typed'),
+      $container->get('state'),
+      $container->get('o365_smtp.client'),
+    );
+  }
 
   /**
    * {@inheritdoc}
@@ -38,11 +81,18 @@ class O365SmtpSettingsForm extends ConfigFormBase {
       '#required' => TRUE,
     ];
 
+    $secret_overridden = $this->client->isClientSecretOverridden();
+    $has_secret = $secret_overridden || (string) $config->get('client_secret') !== '';
     $form['client_secret'] = [
-      '#type' => 'textfield',
+      '#type' => 'password',
       '#title' => $this->t('Client Secret Value'),
-      '#default_value' => $config->get('client_secret'),
-      '#required' => TRUE,
+      '#required' => !$has_secret,
+      '#disabled' => $secret_overridden,
+      '#placeholder' => $has_secret ? $this->t('Leave empty to keep the current value') : '',
+      '#attributes' => ['autocomplete' => 'new-password'],
+      '#description' => $secret_overridden
+        ? $this->t('The client secret is defined in settings.php (<code>@setting</code>) and cannot be changed here.', ['@setting' => self::SECRET_SETTING])
+        : $this->t('Stored in configuration. For production sites, prefer <code>@setting</code> in settings.php so the secret is not exported with the configuration.', ['@setting' => self::SECRET_SETTING]),
     ];
 
     $form['tenant_id'] = [
@@ -66,9 +116,17 @@ class O365SmtpSettingsForm extends ConfigFormBase {
       '#default_value' => $config->get('from_name'),
     ];
 
+    $form['max_attachment_size'] = [
+      '#type' => 'number',
+      '#title' => $this->t('Maximum attachment size (MB)'),
+      '#description' => $this->t('Attachments larger than this are refused and the email is not sent.'),
+      '#min' => 1,
+      '#default_value' => $config->get('max_attachment_size') ?: O365Client::DEFAULT_MAX_ATTACHMENT_SIZE,
+      '#required' => TRUE,
+    ];
+
     // Authorization status and link.
-    $access_token = \Drupal::state()->get('o365_smtp.access_token');
-    $refresh_token = \Drupal::state()->get('o365_smtp.refresh_token');
+    $refresh_token = $this->state->get('o365_smtp.refresh_token');
 
     if ($refresh_token) {
       $form['auth_status'] = [
@@ -83,17 +141,14 @@ class O365SmtpSettingsForm extends ConfigFormBase {
       $link_text = $this->t('Authorize with Office 365');
     }
 
-    // Only show auth link if config is saved (we need client ID/Secret to generate the link).
-    if ($config->get('client_id') && $config->get('client_secret')) {
-       // We'll generate the link in the controller or here.
-       // Ideally, we redirect to a controller that builds the provider and redirects.
-       $auth_url = Url::fromRoute('o365_smtp.callback', ['op' => 'authorize'])->toString();
-       $form['auth_link'] = [
-         '#type' => 'link',
-         '#title' => $link_text,
-         '#url' => Url::fromRoute('o365_smtp.callback', ['op' => 'authorize']),
-         '#attributes' => ['class' => ['button', 'button--primary']],
-       ];
+    // The authorization link needs saved credentials.
+    if ($this->client->isConfigured()) {
+      $form['auth_link'] = [
+        '#type' => 'link',
+        '#title' => $link_text,
+        '#url' => Url::fromRoute('o365_smtp.callback', ['op' => 'authorize']),
+        '#attributes' => ['class' => ['button', 'button--primary']],
+      ];
     }
 
     return parent::buildForm($form, $form_state);
@@ -103,13 +158,19 @@ class O365SmtpSettingsForm extends ConfigFormBase {
    * {@inheritdoc}
    */
   public function submitForm(array &$form, FormStateInterface $form_state) {
-    $this->config('o365_smtp.settings')
+    $config = $this->config('o365_smtp.settings')
       ->set('client_id', $form_state->getValue('client_id'))
-      ->set('client_secret', $form_state->getValue('client_secret'))
       ->set('tenant_id', $form_state->getValue('tenant_id'))
       ->set('from_email', $form_state->getValue('from_email'))
       ->set('from_name', $form_state->getValue('from_name'))
-      ->save();
+      ->set('max_attachment_size', (int) $form_state->getValue('max_attachment_size'));
+
+    // An empty password field keeps the stored secret.
+    $secret = (string) $form_state->getValue('client_secret');
+    if ($secret !== '' && !$this->client->isClientSecretOverridden()) {
+      $config->set('client_secret', $secret);
+    }
+    $config->save();
 
     parent::submitForm($form, $form_state);
   }
