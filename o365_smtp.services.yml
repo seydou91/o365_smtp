@@ -12,3 +12,5 @@ services:
       - '@logger.channel.o365_smtp'
       - '@file_system'
       - '@email.validator'
+      - '@request_stack'
+      - '@lock'

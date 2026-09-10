@@ -169,14 +169,56 @@ Attachment restrictions:
   default).
 - A refused attachment is logged and the whole email is not sent.
 
+### Sender (From) behavior
+
+Office 365 only accepts messages whose sender is the authenticated mailbox (or
+a mailbox it has *Send As* rights on). The module therefore always uses the
+configured **From Email Address**:
+
+- as the address authenticated with XOAUTH2;
+- as the envelope sender (`MAIL FROM`);
+- as the address of the `From:` header.
+
+The display name of the `From:` header is the configured **From Name**. When it
+is empty, the display name of the From header provided by Drupal (usually the
+site name) is used. The *address* provided by Drupal (`$message['from']`, the
+site email by default) is not used, because Office 365 would reject it with
+`SendAsDenied` unless it is the same mailbox.
+
+### Message format
+
+- The `Content-Type` header set by Drupal is honored: `text/plain` messages
+  (password reset, account notifications…) are converted and wrapped like the
+  core PHP mailer does; `text/html` messages are sent as HTML.
+- Bodies are encoded in quoted-printable (base64 if the message asks for it),
+  so long HTML lines never exceed the SMTP line length limit.
+- Non-ASCII subjects and display names are encoded (RFC 2047).
+- `$message['to']` may contain several comma-separated recipients. `Cc`,
+  `Bcc` (sent to, never shown in headers) and `Reply-To` headers are supported.
+
 ## Troubleshooting
 
-### "SMTP Error: 500 5.3.3 Unrecognized command"
+### Status report
 
-This usually indicates a protocol error. Make sure:
-- Your PHP has the OpenSSL extension enabled
-- Your Azure AD application has **Mail.Send** permissions
-- Admin consent was granted for the permissions
+`/admin/reports/status` shows whether the module is configured and authorized,
+and reports an error when Microsoft rejected the refresh token (expired or
+revoked). In that case authorize the module again from the settings page.
+
+### "500 5.3.3 Unrecognized command"
+
+Earlier versions announced the site with `EHLO` followed by
+`$_SERVER['SERVER_NAME']`. That variable does not exist under Drush or cron, so
+a bare `EHLO` was sent and rejected by Office 365. This was neither an OpenSSL
+nor an Azure permission problem. The module now uses, in this order: the
+**EHLO host name** setting, the host of the current request, then the machine
+host name.
+
+### "SMTP authentication failed"
+
+The error returned by Microsoft is logged and shown, for example
+`{"status":"401","schemes":"bearer","scope":"https://outlook.office.com/SMTP.Send"}`.
+Check that SMTP AUTH is enabled on the mailbox and that the From Email Address
+is the account that authorized the module.
 
 ### Authentication Failed
 

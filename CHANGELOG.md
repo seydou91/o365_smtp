@@ -38,3 +38,41 @@ All notable changes to this module are documented in this file.
 - Attachments given as absolute paths (e.g. `/var/www/files/doc.pdf`) are now
   refused. Use a stream wrapper URI or `filecontent`.
 - `O365Client::getAuthorizationUrl()` now requires a second `$state` argument.
+
+### Lot 2 — SMTP protocol and message rendering
+
+- **EHLO under Drush/cron** (the real cause of "500 5.3.3 Unrecognized
+  command"): the host name comes from the new `helo_hostname` setting, else the
+  current request host, else `php_uname('n')`.
+- **XOAUTH2 failures**: `235` is required; on `334` the module sends the empty
+  line, decodes Microsoft's base64 JSON error and puts it in the exception and
+  the log.
+- **Reply codes**: every step expects explicit codes (`220`, `250`, `251`,
+  `235`, `354`, `221`) instead of "not 4xx/5xx".
+- **MIME** is built with `symfony/mime` (a dependency of Drupal core): RFC 2047
+  encoded subject and display names, quoted-printable bodies (base64 when the
+  message asks for it), random boundaries, CRLF line endings.
+- **Recipients**: comma-separated `To`, `Cc` and `Bcc` each get their own
+  `RCPT TO`; `Bcc` is never written in the headers; `Reply-To` is propagated.
+- **Drupal headers**: `Content-Type` (`text/plain` / `text/html`),
+  `Content-Transfer-Encoding`, `Reply-To`, `Cc`, `Bcc` are honored. Plain text
+  messages are formatted like the core PHP mailer instead of being sent as HTML.
+- **From**: `"From Name" <from_email>`; without a configured From name, the
+  display name of Drupal's From header is used. The configured address remains
+  the authenticated user, envelope sender and header address.
+- **Socket**: always closed (`try`/`finally`), read/write timeout, response
+  reading can no longer loop forever and reports timeouts and closed
+  connections; a failed `QUIT` after acceptance no longer fails the send.
+- **Token refresh** is serialized with the `lock` service and re-reads the
+  State after acquiring it. When Microsoft rejects the refresh token
+  (`invalid_grant`), tokens are removed from State and the
+  `o365_smtp.reauthorization_required` flag is set.
+- **Status report** (`hook_requirements()` in the new `o365_smtp.install`):
+  missing configuration, missing authorization, re-authorization required,
+  missing OpenSSL extension, client secret still stored in configuration.
+
+**Behavior changes**
+
+- `O365Client::send()` gets an optional sixth `$headers` argument. Without a
+  `Content-Type` header the body is still sent as HTML.
+- Invalid recipient addresses now throw instead of being passed to the server.

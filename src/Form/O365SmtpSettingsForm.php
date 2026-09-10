@@ -125,6 +125,13 @@ class O365SmtpSettingsForm extends ConfigFormBase {
       '#required' => TRUE,
     ];
 
+    $form['helo_hostname'] = [
+      '#type' => 'textfield',
+      '#title' => $this->t('EHLO host name'),
+      '#description' => $this->t('Host name announced to the SMTP server. Leave empty to use the host of the current request, or the machine host name under Drush and cron.'),
+      '#default_value' => $config->get('helo_hostname'),
+    ];
+
     // Authorization status and link.
     $refresh_token = $this->state->get('o365_smtp.refresh_token');
 
@@ -163,7 +170,8 @@ class O365SmtpSettingsForm extends ConfigFormBase {
       ->set('tenant_id', $form_state->getValue('tenant_id'))
       ->set('from_email', $form_state->getValue('from_email'))
       ->set('from_name', $form_state->getValue('from_name'))
-      ->set('max_attachment_size', (int) $form_state->getValue('max_attachment_size'));
+      ->set('max_attachment_size', (int) $form_state->getValue('max_attachment_size'))
+      ->set('helo_hostname', trim((string) $form_state->getValue('helo_hostname')));
 
     // An empty password field keeps the stored secret.
     $secret = (string) $form_state->getValue('client_secret');

@@ -3,6 +3,7 @@
 namespace Drupal\o365_smtp\Plugin\Mail;
 
 use Drupal\Core\Config\ConfigFactoryInterface;
+use Drupal\Core\Mail\MailFormatHelper;
 use Drupal\Core\Mail\MailInterface;
 use Drupal\Core\Plugin\ContainerFactoryPluginInterface;
 use Drupal\o365_smtp\Service\O365Client;
@@ -51,8 +52,12 @@ class O365SmtpMail implements MailInterface, ContainerFactoryPluginInterface {
    * {@inheritdoc}
    */
   public function format(array $message) {
-    // Join the body array into one string.
     $message['body'] = implode("\n\n", $message['body']);
+    // Plain text messages get the same processing as with the core PHP mail
+    // plugin; HTML messages are sent as they are.
+    if (!$this->isHtml($message)) {
+      $message['body'] = MailFormatHelper::wrapMail(MailFormatHelper::htmlToText($message['body']));
+    }
     return $message;
   }
 
@@ -61,8 +66,6 @@ class O365SmtpMail implements MailInterface, ContainerFactoryPluginInterface {
    */
   public function mail(array $message) {
     $from_email = (string) $this->configFactory->get('o365_smtp.settings')->get('from_email');
-
-    // If from_email is not configured, we can't send.
     if ($from_email === '') {
       $this->logger->error('From email is not configured.');
       return FALSE;
@@ -74,7 +77,8 @@ class O365SmtpMail implements MailInterface, ContainerFactoryPluginInterface {
         (string) $message['to'],
         (string) $message['subject'],
         (string) $message['body'],
-        $message['params'] ?? NULL
+        $message['params'] ?? NULL,
+        $message['headers'] ?? [],
       );
       return TRUE;
     }
@@ -82,6 +86,20 @@ class O365SmtpMail implements MailInterface, ContainerFactoryPluginInterface {
       $this->logger->error('Mail sending failed: @error', ['@error' => $e->getMessage()]);
       return FALSE;
     }
+  }
+
+  /**
+   * Checks whether a message has an HTML content type.
+   *
+   * @param array $message
+   *   The Drupal message.
+   *
+   * @return bool
+   *   TRUE if the Content-Type header is text/html.
+   */
+  protected function isHtml(array $message): bool {
+    $headers = array_change_key_case($message['headers'] ?? [], CASE_LOWER);
+    return str_contains(strtolower((string) ($headers['content-type'] ?? '')), 'text/html');
   }
 
 }

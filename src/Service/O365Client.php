@@ -5,11 +5,20 @@ namespace Drupal\o365_smtp\Service;
 use Drupal\Component\Utility\EmailValidatorInterface;
 use Drupal\Core\Config\ConfigFactoryInterface;
 use Drupal\Core\File\FileSystemInterface;
+use Drupal\Core\Lock\LockBackendInterface;
 use Drupal\Core\Site\Settings;
 use Drupal\Core\State\StateInterface;
 use GuzzleHttp\ClientInterface;
+use GuzzleHttp\Exception\ClientException;
 use GuzzleHttp\Exception\RequestException;
 use Psr\Log\LoggerInterface;
+use Symfony\Component\HttpFoundation\RequestStack;
+use Symfony\Component\Mime\Address;
+use Symfony\Component\Mime\Header\Headers;
+use Symfony\Component\Mime\Message;
+use Symfony\Component\Mime\Part\DataPart;
+use Symfony\Component\Mime\Part\Multipart\MixedPart;
+use Symfony\Component\Mime\Part\TextPart;
 
 /**
  * Service for interacting with Office 365 (OAuth2 and SMTP).
@@ -27,6 +36,11 @@ class O365Client {
   const SMTP_PORT = 587;
 
   /**
+   * Network timeout, in seconds, for the SMTP connection and the token lock.
+   */
+  const TIMEOUT = 30;
+
+  /**
    * OAuth2 scopes requested from Microsoft Entra ID.
    */
   const OAUTH_SCOPE = 'offline_access https://outlook.office.com/SMTP.Send';
@@ -40,6 +54,25 @@ class O365Client {
    * Default maximum size of a single attachment, in megabytes.
    */
   const DEFAULT_MAX_ATTACHMENT_SIZE = 10;
+
+  /**
+   * Name of the lock serializing token refreshes.
+   */
+  const TOKEN_REFRESH_LOCK = 'o365_smtp.token_refresh';
+
+  /**
+   * State keys holding the OAuth2 tokens.
+   */
+  const TOKEN_STATE_KEYS = [
+    'o365_smtp.access_token',
+    'o365_smtp.refresh_token',
+    'o365_smtp.token_expires',
+  ];
+
+  /**
+   * State key flagging that Microsoft rejected the refresh token.
+   */
+  const REAUTHORIZATION_REQUIRED = 'o365_smtp.reauthorization_required';
 
   /**
    * Constructs an O365Client object.
@@ -56,6 +89,10 @@ class O365Client {
    *   The file system service.
    * @param \Drupal\Component\Utility\EmailValidatorInterface $emailValidator
    *   The email validator.
+   * @param \Symfony\Component\HttpFoundation\RequestStack $requestStack
+   *   The request stack.
+   * @param \Drupal\Core\Lock\LockBackendInterface $lock
+   *   The lock backend.
    */
   public function __construct(
     protected ConfigFactoryInterface $configFactory,
@@ -64,6 +101,8 @@ class O365Client {
     protected LoggerInterface $logger,
     protected FileSystemInterface $fileSystem,
     protected EmailValidatorInterface $emailValidator,
+    protected RequestStack $requestStack,
+    protected LockBackendInterface $lock,
   ) {}
 
   /**
@@ -99,6 +138,26 @@ class O365Client {
   public function isConfigured(): bool {
     $config = $this->configFactory->get('o365_smtp.settings');
     return $config->get('client_id') && $config->get('tenant_id') && $this->getClientSecret() !== '';
+  }
+
+  /**
+   * Checks whether the module holds a refresh token.
+   *
+   * @return bool
+   *   TRUE if the module has been authorized.
+   */
+  public function isAuthorized(): bool {
+    return (bool) $this->state->get('o365_smtp.refresh_token');
+  }
+
+  /**
+   * Checks whether Microsoft rejected the refresh token.
+   *
+   * @return bool
+   *   TRUE if an administrator must authorize the module again.
+   */
+  public function isReauthorizationRequired(): bool {
+    return (bool) $this->state->get(self::REAUTHORIZATION_REQUIRED);
   }
 
   /**
@@ -147,24 +206,81 @@ class O365Client {
   }
 
   /**
+   * Returns a valid access token, refreshing it when needed.
+   *
+   * @return string
+   *   The access token.
+   */
+  public function getAccessToken(): string {
+    return $this->getStoredAccessToken() ?? $this->refreshAccessToken();
+  }
+
+  /**
    * Refreshes the access token.
+   *
+   * Microsoft rotates refresh tokens: two concurrent refreshes would make one
+   * of them use an invalidated token. Refreshes are therefore serialized with
+   * a lock, and a request that waited for another one reuses its result.
    *
    * @return string
    *   The new access token.
    */
   public function refreshAccessToken(): string {
-    $refresh_token = $this->state->get('o365_smtp.refresh_token');
-    if (!$refresh_token) {
-      throw new \RuntimeException('No refresh token available.');
+    $previous_refresh_token = $this->state->get('o365_smtp.refresh_token');
+    if (!$this->lock->acquire(self::TOKEN_REFRESH_LOCK, self::TIMEOUT)) {
+      $this->lock->wait(self::TOKEN_REFRESH_LOCK, self::TIMEOUT);
+      if (!$this->lock->acquire(self::TOKEN_REFRESH_LOCK, self::TIMEOUT)) {
+        throw new \RuntimeException('Could not acquire the token refresh lock.');
+      }
     }
 
-    return $this->requestToken([
-      'client_id' => $this->configFactory->get('o365_smtp.settings')->get('client_id'),
-      'scope' => self::OAUTH_SCOPE,
-      'refresh_token' => $refresh_token,
-      'grant_type' => 'refresh_token',
-      'client_secret' => $this->getClientSecret(),
-    ]);
+    try {
+      // Another request may have rotated the tokens in the meantime.
+      $this->state->resetCache();
+      $refresh_token = $this->state->get('o365_smtp.refresh_token');
+      if ($refresh_token !== $previous_refresh_token && ($access_token = $this->getStoredAccessToken())) {
+        return $access_token;
+      }
+      if (!$refresh_token) {
+        throw new \RuntimeException('No refresh token available. Authorize the module with Office 365.');
+      }
+
+      try {
+        return $this->requestToken([
+          'client_id' => $this->configFactory->get('o365_smtp.settings')->get('client_id'),
+          'scope' => self::OAUTH_SCOPE,
+          'refresh_token' => $refresh_token,
+          'grant_type' => 'refresh_token',
+          'client_secret' => $this->getClientSecret(),
+        ]);
+      }
+      catch (ClientException $e) {
+        $error = json_decode((string) $e->getResponse()->getBody(), TRUE)['error'] ?? '';
+        // The refresh token expired or was revoked: only a new authorization
+        // can fix it.
+        if (in_array($error, ['invalid_grant', 'interaction_required'], TRUE)) {
+          $this->state->deleteMultiple(self::TOKEN_STATE_KEYS);
+          $this->state->set(self::REAUTHORIZATION_REQUIRED, TRUE);
+          $this->logger->error('Microsoft rejected the refresh token (@error): the module must be authorized again with Office 365.', ['@error' => $error]);
+        }
+        throw $e;
+      }
+    }
+    finally {
+      $this->lock->release(self::TOKEN_REFRESH_LOCK);
+    }
+  }
+
+  /**
+   * Returns the stored access token if it is still valid for 5 minutes.
+   *
+   * @return string|null
+   *   The access token, or NULL if it is missing or about to expire.
+   */
+  protected function getStoredAccessToken(): ?string {
+    $access_token = $this->state->get('o365_smtp.access_token');
+    $expires = (int) $this->state->get('o365_smtp.token_expires');
+    return $access_token && (!$expires || time() < $expires - 300) ? $access_token : NULL;
   }
 
   /**
@@ -208,6 +324,7 @@ class O365Client {
       $this->state->set('o365_smtp.refresh_token', $data['refresh_token']);
     }
     $this->state->set('o365_smtp.token_expires', time() + (int) ($data['expires_in'] ?? 0));
+    $this->state->delete(self::REAUTHORIZATION_REQUIRED);
     return $data['access_token'];
   }
 
@@ -215,13 +332,15 @@ class O365Client {
    * Sends an email via SMTP.
    *
    * @param string $from
-   *   The sender email address.
+   *   The mailbox address: used to authenticate, as envelope sender and as
+   *   address of the From header.
    * @param string $to
-   *   The recipient email address.
+   *   The recipients, as a comma-separated list of addresses, optionally with
+   *   display names ("Name" <address>).
    * @param string $subject
    *   The email subject.
    * @param string $body
-   *   The email body (HTML).
+   *   The email body.
    * @param array|null $params
    *   Optional params array. Supported keys:
    *   - attachments: list of arrays with the keys:
@@ -229,50 +348,207 @@ class O365Client {
    *     - filecontent: the raw file content;
    *     - filename: (optional) the file name shown to the recipient;
    *     - filemime: (optional) the MIME type.
+   * @param array $headers
+   *   Drupal message headers. Supported (case-insensitive): Content-Type
+   *   (text/plain or text/html, default text/html), Content-Transfer-Encoding
+   *   (base64 is honored, anything else becomes quoted-printable), From (its
+   *   display name is used when no From name is configured), Reply-To, Cc and
+   *   Bcc (envelope only).
    *
    * @return bool
    *   TRUE if the email was sent successfully.
    *
    * @throws \Exception
    */
-  public function send(string $from, string $to, string $subject, string $body, ?array $params = NULL): bool {
-    $from = $this->validateAddress($from);
-    $to = $this->validateAddress($to);
+  public function send(string $from, string $to, string $subject, string $body, ?array $params = NULL, array $headers = []): bool {
+    $sender = $this->validateAddress($from);
+    $headers = array_change_key_case(array_map('strval', $headers), CASE_LOWER);
+
+    // Every recipient gets an RCPT TO; Bcc recipients never appear in headers.
+    $recipients = [];
+    foreach ([$to, $headers['cc'] ?? '', $headers['bcc'] ?? ''] as $list) {
+      foreach ($this->parseAddressList($list) as $address) {
+        $recipients[strtolower($address->getAddress())] = $address->getAddress();
+      }
+    }
+    if (!$recipients) {
+      throw new \InvalidArgumentException('The email has no recipient.');
+    }
+
     // Build the message first: a refused attachment must fail before any
     // connection is opened.
-    $message = $this->buildMimeMessage($from, $to, $subject, $body, $params['attachments'] ?? []);
-
-    $access_token = $this->state->get('o365_smtp.access_token');
-    $expires = $this->state->get('o365_smtp.token_expires');
-    if (!$access_token || ($expires && time() > $expires - 300)) {
-      $access_token = $this->refreshAccessToken();
-    }
+    $message = $this->buildMimeMessage($sender, $to, $subject, $body, $params['attachments'] ?? [], $headers);
+    $access_token = $this->getAccessToken();
+    $helo = $this->getHeloHostname();
 
     $socket = $this->connect();
+    try {
+      $this->expectResponse($socket, [220], 'connection');
+      $this->sendCommand($socket, 'EHLO ' . $helo, [250]);
+      $this->sendCommand($socket, 'STARTTLS', [220]);
+      if (!stream_socket_enable_crypto($socket, TRUE, STREAM_CRYPTO_METHOD_TLS_CLIENT)) {
+        throw new \RuntimeException('Failed to enable TLS encryption: the certificate of ' . self::SMTP_HOST . ' could not be verified.');
+      }
+      $this->sendCommand($socket, 'EHLO ' . $helo, [250]);
+      $this->authenticate($socket, $sender, $access_token);
+      $this->sendCommand($socket, "MAIL FROM:<$sender>", [250]);
+      foreach ($recipients as $recipient) {
+        $this->sendCommand($socket, "RCPT TO:<$recipient>", [250, 251]);
+      }
+      $this->sendCommand($socket, 'DATA', [354]);
+      $this->sendDataMessage($socket, $message);
+      try {
+        $this->sendCommand($socket, 'QUIT', [221]);
+      }
+      catch (\RuntimeException $e) {
+        // The message has already been accepted: ignore a failed QUIT.
+      }
+    }
+    finally {
+      fclose($socket);
+    }
+    return TRUE;
+  }
 
-    $this->readResponse($socket);
+  /**
+   * Builds the MIME message.
+   *
+   * @param string $from
+   *   The mailbox address.
+   * @param string $to
+   *   The comma-separated recipients.
+   * @param string $subject
+   *   The subject.
+   * @param string $body
+   *   The body.
+   * @param array $attachments
+   *   The attachments, see ::send().
+   * @param array $headers
+   *   The Drupal message headers, see ::send().
+   *
+   * @return string
+   *   The MIME message, with CRLF line endings.
+   */
+  public function buildMimeMessage(string $from, string $to, string $subject, string $body, array $attachments = [], array $headers = []): string {
+    $headers = array_change_key_case(array_map('strval', $headers), CASE_LOWER);
 
-    $this->sendCommand($socket, "EHLO " . $_SERVER['SERVER_NAME']);
-    $this->sendCommand($socket, "STARTTLS");
+    $mime_headers = new Headers();
+    $mime_headers->addMailboxListHeader('From', [
+      new Address($this->validateAddress($from), $this->getFromName($headers['from'] ?? '')),
+    ]);
+    $address_headers = [
+      'To' => $to,
+      'Cc' => $headers['cc'] ?? '',
+      'Reply-To' => $headers['reply-to'] ?? '',
+    ];
+    foreach ($address_headers as $name => $list) {
+      if ($addresses = $this->parseAddressList($list)) {
+        $mime_headers->addMailboxListHeader($name, $addresses);
+      }
+    }
+    // Non-ASCII subjects are encoded as RFC 2047 encoded-words.
+    $mime_headers->addTextHeader('Subject', $this->sanitizeHeaderValue($subject));
 
-    if (!stream_socket_enable_crypto($socket, TRUE, STREAM_CRYPTO_METHOD_TLS_CLIENT)) {
-      throw new \RuntimeException('Failed to enable TLS encryption.');
+    // Quoted-printable (or base64) keeps every line under the 998 octet limit
+    // of RFC 5321, whatever the body.
+    $content_type = strtolower($headers['content-type'] ?? 'text/html');
+    $text_part = new TextPart(
+      $body,
+      'utf-8',
+      str_starts_with($content_type, 'text/plain') ? 'plain' : 'html',
+      str_contains(strtolower($headers['content-transfer-encoding'] ?? ''), 'base64') ? 'base64' : 'quoted-printable',
+    );
+
+    $attachment_parts = [];
+    foreach ($attachments as $attachment) {
+      $filename = $this->sanitizeHeaderValue((string) ($attachment['filename'] ?? basename((string) ($attachment['filepath'] ?? ''))));
+      $filemime = $this->sanitizeHeaderValue((string) ($attachment['filemime'] ?? ''));
+      if (!preg_match('@^[\w.+-]+/[\w.+-]+$@', $filemime)) {
+        $filemime = 'application/octet-stream';
+      }
+      $attachment_parts[] = new DataPart($this->readAttachment($attachment), $filename ?: 'attachment', $filemime);
     }
 
-    $this->sendCommand($socket, "EHLO " . $_SERVER['SERVER_NAME']);
+    $message = new Message($mime_headers, $attachment_parts ? new MixedPart($text_part, ...$attachment_parts) : $text_part);
+    return $message->toString();
+  }
 
-    $auth_str = base64_encode("user=" . $from . "\1auth=Bearer " . $access_token . "\1\1");
-    $this->sendCommand($socket, "AUTH XOAUTH2 " . $auth_str);
+  /**
+   * Parses a comma-separated address list.
+   *
+   * @param string $list
+   *   Addresses, optionally with display names ("Name" <address>).
+   *
+   * @return \Symfony\Component\Mime\Address[]
+   *   The addresses.
+   *
+   * @throws \InvalidArgumentException
+   *   When an address is not valid.
+   */
+  protected function parseAddressList(string $list): array {
+    $addresses = [];
+    // Split on commas that are not inside a quoted display name.
+    foreach (preg_split('/,(?=(?:[^"]*"[^"]*")*[^"]*$)/', $this->sanitizeHeaderValue($list)) as $item) {
+      if (trim($item) === '') {
+        continue;
+      }
+      $address = Address::create(trim($item));
+      $this->validateAddress($address->getAddress());
+      $addresses[] = $address;
+    }
+    return $addresses;
+  }
 
-    $this->sendCommand($socket, "MAIL FROM:<$from>");
-    $this->sendCommand($socket, "RCPT TO:<$to>");
-    $this->sendCommand($socket, "DATA");
+  /**
+   * Returns the display name of the From header.
+   *
+   * @param string $from_header
+   *   The From header provided by Drupal, if any.
+   *
+   * @return string
+   *   The configured From name, else the display name of the Drupal header.
+   */
+  protected function getFromName(string $from_header): string {
+    $name = (string) $this->configFactory->get('o365_smtp.settings')->get('from_name');
+    if ($name === '' && $from_header !== '') {
+      try {
+        $name = Address::create($this->sanitizeHeaderValue($from_header))->getName();
+      }
+      catch (\InvalidArgumentException $e) {
+        return '';
+      }
+      // The mail manager encodes non-ASCII display names (RFC 2047).
+      if (str_contains($name, '=?') && extension_loaded('mbstring')) {
+        $name = mb_decode_mimeheader($name);
+      }
+    }
+    return $this->sanitizeHeaderValue($name);
+  }
 
-    $this->sendDataMessage($socket, $message);
-    $this->sendCommand($socket, "QUIT");
-
-    fclose($socket);
-    return TRUE;
+  /**
+   * Returns the host name announced with EHLO.
+   *
+   * $_SERVER['SERVER_NAME'] is not set under Drush or cron, which made the
+   * module send a bare "EHLO" rejected with "500 5.3.3 Unrecognized command".
+   *
+   * @return string
+   *   The configured HELO host name, else the current request host, else the
+   *   machine host name.
+   */
+  protected function getHeloHostname(): string {
+    $candidates = [
+      $this->configFactory->get('o365_smtp.settings')->get('helo_hostname'),
+      $this->requestStack->getCurrentRequest()?->getHost(),
+      php_uname('n'),
+    ];
+    foreach ($candidates as $candidate) {
+      $hostname = preg_replace('/[^A-Za-z0-9.-]/', '', (string) $candidate);
+      // Drush uses "default" as request host when no --uri is given.
+      if ($hostname !== '' && $hostname !== 'default') {
+        return $hostname;
+      }
+    }
+    return 'localhost';
   }
 
   /**
@@ -294,11 +570,166 @@ class O365Client {
         'allow_self_signed' => FALSE,
       ],
     ]);
-    $socket = stream_socket_client('tcp://' . self::SMTP_HOST . ':' . self::SMTP_PORT, $errno, $errstr, 30, STREAM_CLIENT_CONNECT, $context);
+    $socket = stream_socket_client('tcp://' . self::SMTP_HOST . ':' . self::SMTP_PORT, $errno, $errstr, self::TIMEOUT, STREAM_CLIENT_CONNECT, $context);
     if (!$socket) {
       throw new \RuntimeException("Could not connect to SMTP host: $errstr ($errno)");
     }
+    stream_set_timeout($socket, self::TIMEOUT);
     return $socket;
+  }
+
+  /**
+   * Authenticates with XOAUTH2.
+   *
+   * @param resource $socket
+   *   The SMTP socket.
+   * @param string $user
+   *   The mailbox address.
+   * @param string $access_token
+   *   The OAuth2 access token.
+   *
+   * @throws \RuntimeException
+   *   When authentication fails, with the error returned by Microsoft.
+   */
+  protected function authenticate($socket, string $user, string $access_token): void {
+    $initial_response = base64_encode("user=$user\1auth=Bearer $access_token\1\1");
+    $response = $this->sendCommand($socket, 'AUTH XOAUTH2 ' . $initial_response, [235, 334]);
+    if ($this->getResponseCode($response) === 235) {
+      return;
+    }
+
+    // On failure the server sends a 334 challenge holding a base64-encoded
+    // JSON error, and waits for an empty line before its final reply.
+    $error = base64_decode(trim(substr($response, 4)), TRUE) ?: trim($response);
+    $this->write($socket, "\r\n");
+    $final_response = trim($this->readResponse($socket));
+    $this->logger->error('SMTP XOAUTH2 authentication failed for @user: @error @response', [
+      '@user' => $user,
+      '@error' => $error,
+      '@response' => $final_response,
+    ]);
+    throw new \RuntimeException(sprintf('SMTP authentication failed: %s %s', $error, $final_response));
+  }
+
+  /**
+   * Sends a command and checks the reply code.
+   *
+   * @param resource $socket
+   *   The SMTP socket.
+   * @param string $command
+   *   The command, without trailing CRLF.
+   * @param int[] $expected_codes
+   *   The accepted reply codes.
+   *
+   * @return string
+   *   The server response.
+   */
+  protected function sendCommand($socket, string $command, array $expected_codes): string {
+    $this->write($socket, $command . "\r\n");
+    // Only the verb goes into error messages: AUTH carries the access token.
+    return $this->expectResponse($socket, $expected_codes, explode(' ', $command, 2)[0]);
+  }
+
+  /**
+   * Reads a response and checks its reply code.
+   *
+   * @param resource $socket
+   *   The SMTP socket.
+   * @param int[] $expected_codes
+   *   The accepted reply codes.
+   * @param string $context
+   *   What the response answers, for error messages.
+   *
+   * @return string
+   *   The server response.
+   *
+   * @throws \RuntimeException
+   *   When the reply code is not expected.
+   */
+  protected function expectResponse($socket, array $expected_codes, string $context): string {
+    $response = $this->readResponse($socket);
+    if (!in_array($this->getResponseCode($response), $expected_codes, TRUE)) {
+      throw new \RuntimeException(sprintf('Unexpected SMTP response to %s: %s', $context, trim($response)));
+    }
+    return $response;
+  }
+
+  /**
+   * Sends the message after DATA, with dot-stuffing.
+   *
+   * @param resource $socket
+   *   The SMTP socket.
+   * @param string $message
+   *   The full MIME message.
+   */
+  protected function sendDataMessage($socket, string $message): void {
+    $data = '';
+    foreach (preg_split('/\r\n|\r|\n/', rtrim($message, "\r\n")) as $line) {
+      // Dot-stuffing, RFC 5321 section 4.5.2.
+      $data .= (str_starts_with($line, '.') ? '.' : '') . $line . "\r\n";
+    }
+    $this->write($socket, $data . ".\r\n");
+    $this->expectResponse($socket, [250], 'DATA');
+  }
+
+  /**
+   * Writes data to the socket.
+   *
+   * @param resource $socket
+   *   The SMTP socket.
+   * @param string $data
+   *   The data.
+   *
+   * @throws \RuntimeException
+   *   When the connection is closed or times out.
+   */
+  protected function write($socket, string $data): void {
+    while ($data !== '') {
+      $written = fwrite($socket, $data);
+      if (!$written) {
+        throw new \RuntimeException('Failed to write to the SMTP connection.');
+      }
+      $data = substr($data, $written);
+    }
+  }
+
+  /**
+   * Reads a (possibly multi-line) server response.
+   *
+   * @param resource $socket
+   *   The SMTP socket.
+   *
+   * @return string
+   *   The response.
+   *
+   * @throws \RuntimeException
+   *   When the connection is closed or times out before the last line.
+   */
+  protected function readResponse($socket): string {
+    $response = '';
+    do {
+      $line = fgets($socket, 1024);
+      if ($line === FALSE) {
+        $reason = stream_get_meta_data($socket)['timed_out'] ? 'Timed out waiting for the SMTP server' : 'The SMTP server closed the connection';
+        throw new \RuntimeException(sprintf('%s. Partial response: %s', $reason, trim($response)));
+      }
+      $response .= $line;
+      // Every line of a multi-line reply but the last has "-" after the code.
+    } while (isset($line[3]) && $line[3] === '-');
+    return $response;
+  }
+
+  /**
+   * Extracts the reply code of a response.
+   *
+   * @param string $response
+   *   The server response.
+   *
+   * @return int
+   *   The three-digit reply code, 0 if there is none.
+   */
+  protected function getResponseCode(string $response): int {
+    return (int) substr($response, 0, 3);
   }
 
   /**
@@ -408,148 +839,6 @@ class O365Client {
   protected function refuseAttachment(string $file, string $reason): never {
     $this->logger->warning('Attachment @file refused: @reason.', ['@file' => $file, '@reason' => $reason]);
     throw new \InvalidArgumentException(sprintf('Attachment %s refused: %s.', $file, $reason));
-  }
-
-  /**
-   * Sends the message body via DATA command with proper dot-stuffing.
-   *
-   * @param resource $socket
-   *   The SMTP socket.
-   * @param string $message
-   *   The full MIME message.
-   *
-   * @throws \Exception
-   */
-  protected function sendDataMessage($socket, string $message): void {
-    $lines = explode("\r\n", $message);
-    foreach ($lines as $line) {
-      if ($line === '') {
-        fwrite($socket, "\r\n");
-      }
-      else {
-        fwrite($socket, $this->smtpEscape($line) . "\r\n");
-      }
-    }
-    fwrite($socket, ".\r\n");
-    $response = $this->readResponse($socket);
-    if (preg_match('/^[45]/', $response)) {
-      throw new \RuntimeException("SMTP Error during DATA: $response");
-    }
-  }
-
-  /**
-   * Builds a MIME multipart message.
-   *
-   * @param string $from
-   *   The validated sender address.
-   * @param string $to
-   *   The validated recipient address.
-   * @param string $subject
-   *   The subject.
-   * @param string $body
-   *   The HTML body.
-   * @param array $attachments
-   *   The attachments, see ::send().
-   *
-   * @return string
-   *   The MIME message.
-   */
-  public function buildMimeMessage(string $from, string $to, string $subject, string $body, array $attachments = []): string {
-    $boundary = md5(uniqid(time()));
-    $mime_boundary = '----=_Part_' . $boundary;
-
-    $headers = "From: $from\r\n";
-    $headers .= "To: $to\r\n";
-    $headers .= "Subject: " . $this->sanitizeHeaderValue($subject) . "\r\n";
-    $headers .= "MIME-Version: 1.0\r\n";
-
-    if (empty($attachments)) {
-      $headers .= "Content-Type: text/html; charset=UTF-8\r\n";
-      $headers .= "Content-Transfer-Encoding: 8bit\r\n";
-      $body .= "\r\n";
-      return $headers . "\r\n" . $body;
-    }
-
-    $headers .= "Content-Type: multipart/mixed; boundary=\"$mime_boundary\"\r\n";
-
-    $message = $headers . "\r\n";
-
-    $message .= "--$mime_boundary\r\n";
-    $message .= "Content-Type: text/html; charset=UTF-8\r\n";
-    $message .= "Content-Transfer-Encoding: 8bit\r\n";
-    $message .= "\r\n" . $body . "\r\n";
-
-    foreach ($attachments as $attachment) {
-      $file_content = chunk_split(base64_encode($this->readAttachment($attachment)));
-      $filename = $this->sanitizeHeaderValue((string) ($attachment['filename'] ?? basename((string) ($attachment['filepath'] ?? 'attachment'))));
-      $filemime = $this->sanitizeHeaderValue((string) ($attachment['filemime'] ?? 'application/octet-stream'));
-
-      $message .= "--$mime_boundary\r\n";
-      $message .= "Content-Type: $filemime; name=\"$filename\"\r\n";
-      $message .= "Content-Disposition: attachment; filename=\"$filename\"\r\n";
-      $message .= "Content-Transfer-Encoding: base64\r\n";
-      $message .= "\r\n" . $file_content . "\r\n";
-    }
-
-    $message .= "--$mime_boundary--\r\n";
-    return $message;
-  }
-
-  /**
-   * Escapes a line for SMTP dot-stuffing (RFC 5321).
-   *
-   * @param string $line
-   *   A message line.
-   *
-   * @return string
-   *   The line, with an extra leading dot if it starts with a dot.
-   */
-  protected function smtpEscape(string $line): string {
-    if (str_starts_with($line, '.')) {
-      return '.' . $line;
-    }
-    return $line;
-  }
-
-  /**
-   * Sends a command and checks the response.
-   *
-   * @param resource $socket
-   *   The SMTP socket.
-   * @param string $command
-   *   The command, without trailing CRLF.
-   *
-   * @return string
-   *   The server response.
-   */
-  protected function sendCommand($socket, string $command): string {
-    fwrite($socket, $command . "\r\n");
-    $response = $this->readResponse($socket);
-
-    if (preg_match('/^[45]/', $response)) {
-      throw new \RuntimeException("SMTP Error: $response");
-    }
-    return $response;
-  }
-
-  /**
-   * Reads a (possibly multi-line) server response.
-   *
-   * @param resource $socket
-   *   The SMTP socket.
-   *
-   * @return string
-   *   The response.
-   */
-  protected function readResponse($socket): string {
-    $response = "";
-    while ($str = fgets($socket, 515)) {
-      $response .= $str;
-      if (substr($str, 3, 1) == " ") {
-        break;
-      }
-    }
-    return $response;
   }
 
 }
